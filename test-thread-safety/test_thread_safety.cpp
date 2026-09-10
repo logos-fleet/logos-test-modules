@@ -102,7 +102,7 @@ TEST_F(PluginApiTest, ConcurrentLoadUnknownPlugins) {
             barrier.wait();
             for (int i = 0; i < kIterations; ++i) {
                 std::string name = "unknown_" + std::to_string(t) + "_" + std::to_string(i);
-                int ok = logos_core_load_module(name.c_str(), false);
+                int ok = logos_core_load_module(name.c_str(), LOGOS_LOAD_MODULE_ONLY);
                 EXPECT_EQ(ok, 0);
             }
         });
@@ -112,7 +112,8 @@ TEST_F(PluginApiTest, ConcurrentLoadUnknownPlugins) {
 }
 
 // -----------------------------------------------------------------------------
-// logos_core_load_module(…, true) on unknown plugins from many threads.
+// logos_core_load_module(…, LOGOS_LOAD_REQUIRED_DEPS) on unknown plugins from
+// many threads.
 // Each call must return 0 (failure) without crashing.
 // -----------------------------------------------------------------------------
 TEST_F(PluginApiTest, ConcurrentLoadWithDepsUnknown) {
@@ -124,7 +125,7 @@ TEST_F(PluginApiTest, ConcurrentLoadWithDepsUnknown) {
             barrier.wait();
             for (int i = 0; i < kIterations; ++i) {
                 std::string name = "nodeps_" + std::to_string(t) + "_" + std::to_string(i);
-                int rc = logos_core_load_module(name.c_str(), true);
+                int rc = logos_core_load_module(name.c_str(), LOGOS_LOAD_REQUIRED_DEPS);
                 EXPECT_EQ(rc, 0);
             }
         });
@@ -138,23 +139,51 @@ TEST_F(PluginApiTest, ConcurrentLoadWithDepsUnknown) {
 // All operations go through the public logos_core C API.
 // =============================================================================
 
+static constexpr int kModuleCount = 100;
+
+// Generated once, before the first core exists, and shared by every test.
+//
+// Not merely to save the work. Generating a module spawns a process (codesign,
+// on Apple), and a live core has an async child reaper that will take the exit
+// status of any child, including one it never started — so the QProcess wait
+// inside the generator hangs on a process that has already exited. Doing all
+// the generation from a gtest global environment puts it strictly before
+// logos_core_init(), where there is no reaper to race.
+class DummyModules : public ::testing::Environment {
+public:
+    static DummyModules& instance() { return *s_instance; }
+
+    void SetUp() override {
+        ASSERT_TRUE(m_dir.isValid()) << "could not create a temp dir for the dummy modules";
+        m_modules = DummyModuleGenerator::generate(kModuleCount, m_dir.path());
+    }
+
+    const QVector<DummyModule>& modules() const { return m_modules; }
+    QString path() const { return m_dir.path(); }
+
+private:
+    QTemporaryDir m_dir;
+    QVector<DummyModule> m_modules;
+
+    static DummyModules* s_instance;
+};
+
+DummyModules* DummyModules::s_instance = static_cast<DummyModules*>(
+    ::testing::AddGlobalTestEnvironment(new DummyModules));
+
 class RealPluginThreadSafetyTest : public ::testing::Test {
 protected:
     static constexpr int kThreads = 8;
-    static constexpr int kModuleCount = 100;
     static constexpr int kIterations = 200;
 
-    QTemporaryDir tmpDir;
-    QVector<DummyModule> modules;
+    const QVector<DummyModule>& modules = DummyModules::instance().modules();
 
     void SetUp() override {
-        ASSERT_TRUE(tmpDir.isValid());
-        modules = DummyModuleGenerator::generate(kModuleCount, tmpDir.path());
         if (modules.isEmpty())
             GTEST_SKIP() << "Dummy plugin template not found — skipping real-plugin tests";
         ASSERT_EQ(modules.size(), kModuleCount) << "Partial plugin generation — expected "
             << kModuleCount << " but got " << modules.size();
-        std::string dir = tmpDir.path().toStdString();
+        std::string dir = DummyModules::instance().path().toStdString();
         initPluginState(dir.c_str());
     }
 
@@ -299,7 +328,7 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentGetListsDuringLoadUnload) {
         barrier.wait();
         for (int iter = 0; iter < kIterations; ++iter) {
             std::string name = modules[iter % kSmall].name.toStdString();
-            (void)logos_core_load_module(name.c_str(), false);
+            (void)logos_core_load_module(name.c_str(), LOGOS_LOAD_MODULE_ONLY);
             (void)logos_core_unload_module(name.c_str(), false);
         }
         done.store(true, std::memory_order_release);
@@ -356,7 +385,7 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadPlugin) {
             barrier.wait();
             for (int i = start; i < end; ++i) {
                 std::string name = modules[i].name.toStdString();
-                (void)logos_core_load_module(name.c_str(), false);
+                (void)logos_core_load_module(name.c_str(), LOGOS_LOAD_MODULE_ONLY);
             }
         });
     }
@@ -398,7 +427,7 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadSamePlugin) {
             barrier.wait();
             for (int i = 0; i < kSmall; ++i) {
                 std::string name = modules[i].name.toStdString();
-                (void)logos_core_load_module(name.c_str(), false);
+                (void)logos_core_load_module(name.c_str(), LOGOS_LOAD_MODULE_ONLY);
             }
         });
     }
@@ -411,7 +440,8 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadSamePlugin) {
 }
 
 // -----------------------------------------------------------------------------
-// Each thread loads a disjoint slice via logos_core_load_module(…, true).
+// Each thread loads a disjoint slice via
+// logos_core_load_module(…, LOGOS_LOAD_REQUIRED_DEPS).
 // Tests dependency resolution and loadMutex acquisition from multiple threads.
 // -----------------------------------------------------------------------------
 TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadWithDeps) {
@@ -440,7 +470,7 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadWithDeps) {
             barrier.wait();
             for (int i = start; i < end; ++i) {
                 std::string name = modules[i].name.toStdString();
-                (void)logos_core_load_module(name.c_str(), true);
+                (void)logos_core_load_module(name.c_str(), LOGOS_LOAD_REQUIRED_DEPS);
             }
         });
     }
@@ -483,7 +513,7 @@ TEST_F(RealPluginThreadSafetyTest, ConcurrentLoadUnloadInterleaved) {
             for (int iter = 0; iter < 10; ++iter) {
                 for (int i = 0; i < kSmall; ++i) {
                     std::string name = modules[i].name.toStdString();
-                    (void)logos_core_load_module(name.c_str(), false);
+                    (void)logos_core_load_module(name.c_str(), LOGOS_LOAD_MODULE_ONLY);
                 }
             }
         });

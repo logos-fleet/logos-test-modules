@@ -1084,6 +1084,10 @@
                   "-DDUMMY_PLUGIN_TEMPLATE_DIR=${dummyLibPkg}/lib"
                   "-DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE"
                   "-DCMAKE_INSTALL_RPATH=${logosLiblogosPkg}/lib"
+                ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+                  # The fixture re-signs every module it patches; /usr/bin is
+                  # not in the sandbox, so name the one in the closure.
+                  "-DLOGOS_CODESIGN=${pkgs.darwin.sigtool}/bin/codesign"
                 ];
 
                 installPhase = ''
@@ -1095,7 +1099,8 @@
               };
             in
             pkgs.runCommand "logos-thread-safety-tests" {
-              nativeBuildInputs = [ testBin logosLiblogosPkg ]
+              nativeBuildInputs = [ testBin logosLiblogosPkg pkgs.coreutils ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.darwin.sigtool pkgs.darwin.cctools ]
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
             } ''
               export QT_QPA_PLATFORM=offscreen
@@ -1103,11 +1108,24 @@
               ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
                 export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
               ''}
+              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                # sigtool's codesign spawns codesign_allocate by NAME, and the
+                # fixture calls codesign by absolute path from a compiled-in
+                # define, so PATH alone is not enough to make it findable.
+                export CODESIGN_ALLOCATE="${pkgs.darwin.cctools}/bin/codesign_allocate"
+              ''}
               export DUMMY_PLUGIN_TEMPLATE_DIR="${dummyLibPkg}/lib"
               export LOGOS_HOST_PATH="${logosLiblogosPkg}/bin/logos_host"
               mkdir -p $out
               echo "Running thread safety tests..."
-              ${testBin}/bin/thread_safety_tests --gtest_output=xml:$out/test-results.xml
+              # Under a timeout, because the thing this check exists to catch is
+              # a lock that never comes back: without one, a deadlock is not a
+              # failing check but a build that sits at 0% CPU until somebody
+              # kills it by hand. The ten tests take ~160s on an M-series Mac
+              # (most of it real subprocess module loads), so 600s is "wedged",
+              # not "slow machine".
+              timeout --signal=KILL 600 \
+                ${testBin}/bin/thread_safety_tests --gtest_output=xml:$out/test-results.xml
               echo "Thread safety tests completed."
             '';
         }
