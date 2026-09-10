@@ -30,9 +30,22 @@ public:
         QString ext = QFileInfo(templatePath).suffix();
         if (!ext.isEmpty()) ext.prepend('.');
 
+        // The marker sits in the binary twice, in two encodings, and both have
+        // to be patched:
+        //   UTF-8  — the plugin metadata that the module registry reads.
+        //   UTF-16 — PluginInterface::name(), the module's self-asserted
+        //            identity, emitted as a QStringLiteral. The host compares it
+        //            against the name it loaded the file as, so patching only the
+        //            UTF-8 copy makes every module register under its own name
+        //            and then introduce itself as dummy_module_000000: "plugin
+        //            name mismatch", every load refused.
+        // A replacement must be exactly as long as the marker, or the offsets in
+        // the image move; the zero-padded name is, for any count below a million.
         static const QString kTemplateName = QStringLiteral("dummy_module_000000");
+        const QByteArray markerUtf8  = kTemplateName.toUtf8();
+        const QByteArray markerUtf16 = utf16Le(kTemplateName);
 
-        if (!templateData.contains(kTemplateName.toUtf8())) {
+        if (!templateData.contains(markerUtf8)) {
             qWarning("DummyModuleGenerator: template binary does not contain marker '%s' — "
                      "binary patching will not work", qUtf8Printable(kTemplateName));
             return {};
@@ -45,15 +58,8 @@ public:
             QString moduleName = QString("dummy_module_%1").arg(i, 6, 10, QChar('0'));
 
             QByteArray patched = templateData;
-            patched.replace(kTemplateName.toUtf8(), moduleName.toUtf8());
-            // AND the UTF-16 copy. The module's self-asserted identity —
-            // PluginInterface::name(), which the host compares against the name
-            // it loaded the file as — is emitted as a QStringLiteral, so it
-            // sits in the binary as UTF-16 while the plugin METADATA the
-            // registry reads is UTF-8. Patch only the UTF-8 and every generated
-            // module registers under its own name and then introduces itself as
-            // dummy_module_000000: "plugin name mismatch", every load refused.
-            patched.replace(utf16(kTemplateName), utf16(moduleName));
+            patched.replace(markerUtf8, moduleName.toUtf8());
+            patched.replace(markerUtf16, utf16Le(moduleName));
 
             QString filePath = QDir(outputDir).absoluteFilePath(
                 QString("lib%1_plugin%2").arg(moduleName, ext));
@@ -68,11 +74,10 @@ public:
                 QFileDevice::ReadGroup  | QFileDevice::ExeGroup |
                 QFileDevice::ReadOther  | QFileDevice::ExeOther);
 
-            // A patched image has to be made loadable again before it is
-            // handed out; see reSign(). Fatal rather than an empty return:
-            // an empty one reads as "no template here" and SKIPS the whole
-            // fixture, which is how a fixture stops testing anything without
-            // anyone noticing.
+            // A patched image has to be made loadable again before it is handed
+            // out; see reSign(). Fatal rather than an empty return: an empty one
+            // reads as "no template here" and skips the whole fixture, which is
+            // how a fixture stops testing anything without anyone noticing.
             if (!reSign(filePath))
                 qFatal("DummyModuleGenerator: could not re-sign %s",
                        qUtf8Printable(filePath));
@@ -86,7 +91,7 @@ public:
 private:
     // Little-endian UTF-16 bytes, no BOM and no terminator — the shape
     // QStringLiteral leaves in the binary.
-    static QByteArray utf16(const QString& s) {
+    static QByteArray utf16Le(const QString& s) {
         QByteArray out;
         out.reserve(s.size() * 2);
         for (QChar c : s) {
@@ -97,19 +102,18 @@ private:
         return out;
     }
 
-    // THE PATCH BREAKS THE SIGNATURE, and on arm64 macOS that is fatal rather
-    // than cosmetic: every Mach-O carries at least an ad-hoc signature, the
-    // kernel validates each page as it is faulted in, and a page whose hash no
-    // longer matches kills the process outright — SIGKILL, CODESIGNING/Invalid
+    // The patch breaks the code signature, and on arm64 macOS that is fatal
+    // rather than cosmetic: every Mach-O carries at least an ad-hoc signature,
+    // the kernel validates each page as it is faulted in, and a page whose hash
+    // no longer matches kills the process outright — SIGKILL, CODESIGNING/Invalid
     // Page, no chance to report anything. So a host that dlopen'd one of these
     // died before it could say why, and the only module that ever loaded was
     // dummy_module_000000, whose "patch" replaces its own name with itself and
     // therefore leaves the bytes alone.
     //
-    // Re-signing ad hoc (`--sign -`) recomputes those hashes. It grants no
+    // Re-signing ad hoc (`--sign -`) recomputes those hashes; it grants no
     // entitlement and asks for no identity, which is all a test fixture needs.
-    // Nothing to do anywhere else: ELF has no such check, so on Linux the
-    // patched copy was always loadable.
+    // ELF has no such check, so on Linux the patched copy was always loadable.
     static bool reSign(const QString& path) {
 #ifdef Q_OS_DARWIN
         QString tool = QString::fromLocal8Bit(qgetenv("LOGOS_CODESIGN"));

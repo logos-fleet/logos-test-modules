@@ -141,9 +141,9 @@ TEST_F(PluginApiTest, ConcurrentLoadWithDepsUnknown) {
 
 static constexpr int kModuleCount = 100;
 
-// GENERATED ONCE, BEFORE THE FIRST CORE EXISTS, and shared by every test.
+// Generated once, before the first core exists, and shared by every test.
 //
-// Not merely to save the work. Generating a module SPAWNS a process (codesign,
+// Not merely to save the work. Generating a module spawns a process (codesign,
 // on Apple), and a live core has an async child reaper that will take the exit
 // status of any child, including one it never started — so the QProcess wait
 // inside the generator hangs on a process that has already exited. Doing all
@@ -154,7 +154,7 @@ public:
     static DummyModules& instance() { return *s_instance; }
 
     void SetUp() override {
-        if (!m_dir.isValid()) return;
+        ASSERT_TRUE(m_dir.isValid()) << "could not create a temp dir for the dummy modules";
         m_modules = DummyModuleGenerator::generate(kModuleCount, m_dir.path());
     }
 
@@ -168,11 +168,8 @@ private:
     static DummyModules* s_instance;
 };
 
-DummyModules* DummyModules::s_instance = [] {
-    auto* env = new DummyModules;
-    ::testing::AddGlobalTestEnvironment(env);
-    return env;
-}();
+DummyModules* DummyModules::s_instance = static_cast<DummyModules*>(
+    ::testing::AddGlobalTestEnvironment(new DummyModules));
 
 class RealPluginThreadSafetyTest : public ::testing::Test {
 protected:

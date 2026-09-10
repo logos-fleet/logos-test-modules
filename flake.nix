@@ -1118,7 +1118,7 @@
               export LOGOS_HOST_PATH="${logosLiblogosPkg}/bin/logos_host"
               mkdir -p $out
               echo "Running thread safety tests..."
-              # UNDER A TIMEOUT, because the thing this check exists to catch is
+              # Under a timeout, because the thing this check exists to catch is
               # a lock that never comes back: without one, a deadlock is not a
               # failing check but a build that sits at 0% CPU until somebody
               # kills it by hand. The ten tests take ~160s on an M-series Mac
