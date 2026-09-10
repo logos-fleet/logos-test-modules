@@ -39,5 +39,18 @@ if(DEFINED DUMMY_PLUGIN_TEMPLATE_DIR)
       DUMMY_PLUGIN_TEMPLATE_DIR="${DUMMY_PLUGIN_TEMPLATE_DIR}")
 endif()
 
+# The fixture patches a real plugin binary per dummy module, which invalidates
+# its code signature. On Apple platforms a signature-invalid image is SIGKILLed
+# the moment it is paged in, so each copy has to be re-signed ad hoc — see
+# dummy_module_generator.h. LOGOS_CODESIGN names the tool; the environment
+# variable of the same name overrides it at runtime.
+if(APPLE)
+  if(NOT DEFINED LOGOS_CODESIGN)
+    set(LOGOS_CODESIGN "/usr/bin/codesign")
+  endif()
+  target_compile_definitions(thread_safety_tests PRIVATE
+      LOGOS_CODESIGN="${LOGOS_CODESIGN}")
+endif()
+
 enable_testing()
 add_test(NAME thread_safety_tests COMMAND thread_safety_tests)
