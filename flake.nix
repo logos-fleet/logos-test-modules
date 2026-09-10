@@ -62,10 +62,21 @@
     logos-plugin-qt.url = "github:logos-co/logos-plugin-qt";
     logos-plugin-qt.inputs.logos-nix.follows = "logos-nix";
     logos-plugin-qt.inputs.logos-protocol.follows = "logos-module-builder/logos-protocol";
+    # The trust root, taken as an ARTIFACT rather than through logoscore's
+    # bundle. The inproc check needs capability_module's `bare` output: the
+    # logoscore bundle ships the Qt plugin, which only a subprocess host can
+    # run, and `--container inproc` with the trust root outside the container is
+    # not the arrangement that check exists to exercise.
+    #
+    # Built by the same module-builder as every module here, so its Bare
+    # artifact speaks this closure's logos-protocol — the runtime major
+    # handshake is what a mismatch would fail, and it would fail at dlopen.
+    logos-capability-module.url = "github:logos-co/logos-capability-module";
+    logos-capability-module.inputs.logos-module-builder.follows = "logos-module-builder";
     nixpkgs.follows = "logos-nix/nixpkgs";
   };
 
-  outputs = { self, logos-nix, logos-module-builder, logos-liblogos, logos-logoscore-cli, logos-plugin-qt, nixpkgs }:
+  outputs = { self, logos-nix, logos-module-builder, logos-liblogos, logos-logoscore-cli, logos-plugin-qt, logos-capability-module, nixpkgs }:
     let
       mkModule = logos-module-builder.lib.mkLogosModule;
       mkQmlModule = logos-module-builder.lib.mkLogosQmlModule;
@@ -804,6 +815,101 @@
 
             echo "IPC new-API tests completed."
           '';
+
+          # THE SAME GROUP, IN THE NATIVE CONTAINER.
+          #
+          # Every module the ipc-new-api group touches — the consumer, its two
+          # targets and capability_module — staged as a Bare artifact and run
+          # under `--container inproc`, so the only module process left is
+          # modules_state: four modules share the daemon's image and the group's
+          # assertions are the same ones the subprocess run makes.
+          #
+          # WHAT IT COVERS THAT THE SUBPROCESS RUN CANNOT. Cross-module calls
+          # between modules in ONE image, with the trust root in that image too:
+          # the consumer's first call to each target mints a pair token through
+          # capability_module and every later call presents the cached one, out
+          # of stores that are per-IDENTITY rather than per-image. And the async
+          # half, which is the part a naive in-process container cannot pass at
+          # all — those handlers block waiting on an outbound reply, and the
+          # reply is serviced on the very thread that delivered the call.
+          #
+          # The manifests are written here rather than produced by a bundler
+          # because there is no `install` output for a Bare artifact yet; the
+          # Bundled-set build (#9) is where that arrives. Until then this is the
+          # smallest honest staging: the name the registry trusts, the
+          # dependency edges the loader resolves, and a `main` naming the image.
+          ipc-new-api-inproc-tests =
+            let
+              libExt = if pkgs.stdenv.hostPlatform.isDarwin then "dylib" else "so";
+              # Every plausible spelling points at the one image. lgpm resolves
+              # `main` by trying the host's variant spellings in order
+              # (PackageManagerLib::platformVariantsToTry), so listing them all
+              # keeps this directory correct on any system this flake evaluates
+              # for rather than only the one it was written on.
+              variantKeys = [ "darwin-arm64-dev" "darwin-x86_64-dev"
+                              "linux-x86_64-dev" "linux-aarch64-dev" ];
+              manifestFor = name: deps: pkgs.writeText "${name}-manifest.json" (builtins.toJSON {
+                inherit name;
+                version = "1.0.0";
+                type = "core";
+                category = "testing";
+                description = "${name} (Bare artifact, Native container)";
+                author = "";
+                icon = "";
+                manifestVersion = "0.5.0";
+                dependencies = deps;
+                main = builtins.listToAttrs (map (v: {
+                  name = v;
+                  value = "${name}_bare.${libExt}";
+                }) variantKeys);
+              });
+              stage = name: pkg: deps: ''
+                mkdir -p $out/${name}
+                cp ${pkg}/lib/${name}_bare.${libExt} $out/${name}/
+                cp ${manifestFor name deps} $out/${name}/manifest.json
+              '';
+              bareModulesDir = pkgs.runCommand "test-modules-bare-dir" {} ''
+                mkdir -p $out
+                ${stage "capability_module" logos-capability-module.packages.${system}.bare []}
+                ${stage "test_basic_module" basic.packages.${system}.bare []}
+                ${stage "test_extlib_module" extlib.packages.${system}.bare []}
+                ${stage "test_ipc_new_api_module" ipc-new-api.packages.${system}.bare
+                    [ "test_basic_module" "test_extlib_module" ]}
+                ls -la $out/*
+              '';
+            in
+            pkgs.runCommand "logos-test-modules-ipc-new-api-inproc-tests" {
+              nativeBuildInputs = [
+                logoscorePkg
+                pkgs.jq
+              ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.qt6.qtbase ];
+            } ''
+              export QT_QPA_PLATFORM=offscreen
+              export QT_FORCE_STDERR_LOGGING=1
+              export TEST_GROUPS=ipc-new-api
+              export TEST_TIMEOUT=30
+              # The assertion this check exists for. `auto` would run the same
+              # modules and prove nothing about which container ran them.
+              export LOGOSCORE_CONTAINER=inproc
+              # Only the group's own modules are staged here, so the blanket
+              # load list would WARN for six that are deliberately absent.
+              export LOGOSCORE_LOAD_MODULES="test_basic_module test_extlib_module test_ipc_new_api_module"
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+              ''}
+              mkdir -p $out
+
+              echo "Running IPC new-API tests in the Native container..."
+              bash ${./tests/run_tests.sh} \
+                ${logoscorePkg}/bin/logoscore \
+                ${bareModulesDir} \
+                2>&1 | tee $out/test-results.txt
+
+              grep -q "container policy: inproc" $out/test-results.txt \
+                || { echo "FAIL: the daemon was not started with --container inproc"; exit 1; }
+
+              echo "IPC new-API tests (Native container) completed."
+            '';
 
           # Unit tests using the mock transport — no real IPC / logoscore required
           unit-tests-new-api =
