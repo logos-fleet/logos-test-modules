@@ -91,9 +91,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# LOGOSCORE_CONTAINER: assert which container every module here must run in.
+# Empty (the default) leaves the daemon on `auto`, so an existing invocation is
+# byte-identical. "inproc" requires every operator module in MODULES_DIR to be a
+# Bare module, and the daemon refuses a Qt plugin rather than quietly running it
+# in a subprocess -- which is the whole reason the flag is an assertion and not
+# a preference.
+CONTAINER_ARGS=()
+if [[ -n "${LOGOSCORE_CONTAINER:-}" ]]; then
+    CONTAINER_ARGS=(--container "$LOGOSCORE_CONTAINER")
+    echo "  container policy: $LOGOSCORE_CONTAINER"
+fi
+
 echo "  starting logoscore daemon..."
 "$LOGOSCORE" -D --config-dir "$LOGOSCORE_CONFIG_DIR" \
     -m "$MODULES_DIR" --persistence-path "$CONTEXT_PERSISTENCE_DIR" \
+    "${CONTAINER_ARGS[@]}" \
     >"$LOGOSCORE_CONFIG_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -126,9 +139,14 @@ echo "  daemon ready (pid $DAEMON_PID)"
 # guarantees each group has its module present regardless of which groups
 # run; order is irrelevant since deps resolve automatically. (The daemon
 # auto-loads capability_module itself.)
-for _mod in test_basic_module test_basic_module_cpp test_extlib_module \
-            test_context_module_cpp test_ipc_new_api_module \
-            test_fullapi_cpp test_fullapi_rust test_fullapi_proxy test_fullapi_proxy_rust; do
+# LOGOSCORE_LOAD_MODULES narrows that list. A modules directory built for one
+# group (the Bare set the inproc container runs, say) holds only that group's
+# modules, and the blanket list would then log a WARN per absent module -- noise
+# that reads exactly like the real failure it is meant to report.
+_default_mods="test_basic_module test_basic_module_cpp test_extlib_module \
+               test_context_module_cpp test_ipc_new_api_module \
+               test_fullapi_cpp test_fullapi_rust test_fullapi_proxy test_fullapi_proxy_rust"
+for _mod in ${LOGOSCORE_LOAD_MODULES:-$_default_mods}; do
     if "$LOGOSCORE" --config-dir "$LOGOSCORE_CONFIG_DIR" load-module "$_mod" >/dev/null 2>&1; then
         echo "  loaded: $_mod"
     else
